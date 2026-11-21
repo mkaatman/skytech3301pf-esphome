@@ -1,0 +1,44 @@
+# Home Assistant package: thermostat for the Skytech fireplace ESPHome device.
+#
+# Install as a package:
+#   1. In configuration.yaml:
+#        homeassistant:
+#          packages: !include_dir_named packages
+#   2. Copy this file to <config>/packages/fireplace_thermostat.yaml
+#   3. Edit the two entity IDs below, then restart Home Assistant.
+#
+# Or paste just the `climate:` block into configuration.yaml.
+#
+# Entity IDs to check (Settings -> Devices & services -> ESPHome -> fireplace-esp32):
+#   heater:        the ESPHome "Fireplace" switch
+#   target_sensor: any room temperature sensor (Zigbee, the SHT41 on the ESP32, ...)
+
+climate:
+  - platform: generic_thermostat
+    unique_id: fireplace_thermostat
+    name: Fireplace
+    heater: switch.fireplace_esp32_fireplace
+    target_sensor: sensor.REPLACE_WITH_ROOM_TEMPERATURE   # e.g. sensor.fireplace_esp32_room_temperature
+    min_temp: 60
+    max_temp: 80
+    target_temp: 70
+    target_temp_step: 0.5
+    precision: 0.5
+    # Turn on at (target - cold_tolerance), off at (target + hot_tolerance).
+    cold_tolerance: 0.5
+    hot_tolerance: 0.5
+    # Protect the gas valve / ignition from rapid cycling.
+    min_cycle_duration:
+      minutes: 5
+    # Don't set `keep_alive` here: it would re-switch the heater every few
+    # minutes and the receiver would beep each time. The ESP32 already
+    # re-sends the state (silently) every 30 min.
+    #
+    # Optional fail-safe: turn the fireplace off if the sensor goes quiet.
+    # Only use it with a sensor that reports periodically. Many Zigbee
+    # sensors only report on change, which would trip this falsely.
+    # sensor_stale_duration:
+    #   minutes: 30
+    # Never start heating just because Home Assistant restarted.
+    initial_hvac_mode: "off"
+    away_temp: 62

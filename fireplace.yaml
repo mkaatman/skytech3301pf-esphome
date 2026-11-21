@@ -1,0 +1,148 @@
+# Skytech 3301-PF fireplace - capture stage
+# Board: Lolin NodeMCU v3 (ESP-12E / ESP8266) + CC1101 (433 board, tuned to 303.2 MHz)
+#
+# Wiring (CC1101 -> Lolin):
+#   VCC  -> 3V3 (NOT 5V / VIN)
+#   GND  -> GND
+#   SCK  -> D5 (GPIO14)
+#   MISO -> D6 (GPIO12)
+#   MOSI -> D7 (GPIO13)
+#   CSN  -> D8 (GPIO15)
+#   GDO0 -> D1 (GPIO5)  TX data
+#   GDO2 -> D2 (GPIO4)  RX data
+
+esphome:
+  name: fireplace
+  friendly_name: Fireplace
+  on_boot:
+    priority: -100
+    then:
+      - cc1101.begin_rx
+
+esp8266:
+  board: nodemcuv2
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+spi:
+  clk_pin: GPIO14
+  miso_pin: GPIO12
+  mosi_pin: GPIO13
+
+cc1101:
+  id: radio
+  cs_pin: GPIO15
+  frequency: 303.6MHz        # between remote grant (303.2) and receiver grant (304); wide filter covers both
+  modulation_type: ASK/OOK
+  output_power: 10
+  filter_bandwidth: 812kHz   # widest; covers ~303.2-304.0 MHz until we pin down the real frequency
+
+remote_receiver:
+  pin: GPIO4                  # GDO2
+  # Skytech frame: 32 bits, ~1.47ms/bit, bit value = mark length
+  # (~950us mark = 1, ~480us mark = 0), ~3.5ms gap between repeated frames.
+  tolerance: 25%
+  filter: 200us               # real pulses are >= ~400us; drop glitches
+  idle: 2ms                   # longest in-frame space ~1ms, frame gap ~3.5ms
+  buffer_size: 2kb
+  on_raw:
+    then:
+      - lambda: |-
+          id(rx_captures)++;
+          // Split the capture into runs of in-range pulses (250..1500us);
+          // any out-of-range mark/space (noise, frame gap) ends a run.
+          // A run of 32..34 marks is a frame; keep its LAST 32 bits, since
+          // stray in-range noise can prepend a bit or two.
+          static uint32_t last_code = 0, last_ms = 0, repeats = 0;
+          auto emit = [&](uint32_t code, int bits) {
+            uint32_t now = millis();
+            if (code == last_code && now - last_ms < 500) {
+              repeats++;
+            } else {
+              if (repeats) ESP_LOGI("skytech", "  (previous code x%u)", (unsigned) (repeats + 1));
+              repeats = 0;
+              char b[13];
+              for (int i = 0; i < 12; i++) b[i] = (code >> (11 - i)) & 1 ? '1' : '0';
+              b[12] = 0;
+              ESP_LOGI("skytech", "code=%08X  id=%05X  cmd=%03X  cmd_bits=%.4s %.4s %.4s%s",
+                       (unsigned) code, (unsigned) (code >> 12), (unsigned) (code & 0xFFF),
+                       b, b + 4, b + 8, bits != 32 ? "  (trimmed)" : "");
+              char s[24];
+              snprintf(s, sizeof(s), "%08X", (unsigned) code);
+              id(last_code_sensor).publish_state(s);
+            }
+            last_code = code;
+            last_ms = now;
+          };
+          uint32_t code = 0;
+          int bits = 0, frames = 0;
+          auto flush = [&](int32_t why) {
+            if (bits >= 32 && bits <= 34) { emit(code, bits); frames++; }
+            else if (bits >= 8) ESP_LOGD("skytech", "run of %d bits (%08X) ended by %d us", bits, (unsigned) code, (int) why);
+            code = 0;
+            bits = 0;
+          };
+          for (auto d : x) {
+            int32_t a = d < 0 ? -d : d;
+            bool ok = a >= 250 && a <= 1500;
+            if (!ok) { flush(d); continue; }
+            if (d > 0) { code = (code << 1) | (d > 700 ? 1 : 0); bits++; }
+          }
+          flush(0);
+          if (frames == 0 && x.size() >= 16) {
+            ESP_LOGD("skytech", "capture of %u pulses, no clean frame", (unsigned) x.size());
+            // Dump raw timings (us, +mark/-space) for undecoded captures.
+            std::string out;
+            char t[10];
+            for (size_t i = 0; i < x.size(); i++) {
+              snprintf(t, sizeof(t), "%d ", (int) x[i]);
+              out += t;
+              if (out.size() > 180 || i + 1 == x.size()) {
+                ESP_LOGD("skytech", "  raw: %s", out.c_str());
+                out.clear();
+              }
+            }
+          }
+
+remote_transmitter:
+  pin: GPIO5                  # GDO0
+  carrier_duty_percent: 100%
+  on_transmit:
+    then:
+      - cc1101.begin_tx
+  on_complete:
+    then:
+      - cc1101.begin_rx
+
+globals:
+  - id: rx_captures
+    type: uint32_t
+    initial_value: '0'
+
+# Diagnostics: radio activity heartbeat + keep the CC1101 in RX.
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          ESP_LOGI("radio", "captures in last 60s: %u", (unsigned) id(rx_captures));
+          id(rx_captures) = 0;
+      - cc1101.begin_rx
+
+text_sensor:
+  - platform: template
+    id: last_code_sensor
+    name: "Last RF code"
+
+button:
+  - platform: restart
+    name: "Restart"

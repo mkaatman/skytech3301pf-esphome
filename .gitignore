@@ -1,0 +1,7 @@
+# ESPHome secrets and build output
+secrets.yaml
+.esphome/
+
+# Vendor product photo used only as a local wiring reference
+esp-wroom-32.png
+esp-wroom-32.avif

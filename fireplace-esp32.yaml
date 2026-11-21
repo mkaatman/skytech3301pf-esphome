@@ -1,0 +1,280 @@
+# Skytech 3301-PF fireplace controller (ESP32 + CC1101 @ 304.05 MHz)
+# Board: ESP32-WROOM DevKit + CC1101 (433 board, run at ~303-304 MHz)
+#
+# Wiring (CC1101 -> ESP32):
+#   VCC  -> 3V3 (NOT 5V / VIN)
+#   GND  -> GND
+#   SCK  -> GPIO18
+#   MISO -> GPIO19
+#   MOSI -> GPIO23
+#   CSN  -> GPIO5
+#   GDO0 -> GPIO4   TX data
+#   GDO2 -> GPIO16  RX data
+
+substitutions:
+  # 20-bit security code of YOUR remote. Find it by watching the log while
+  # pressing a button: "code=XXXXXYYY id=XXXXX ..." -> use 0xXXXXX.
+  remote_id: "0xF7FF1"
+
+esphome:
+  name: fireplace-esp32
+  friendly_name: Fireplace ESP32
+  on_boot:
+    priority: -100
+    then:
+      - cc1101.begin_rx
+
+esp32:
+  board: esp32dev
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+spi:
+  clk_pin: GPIO18
+  miso_pin: GPIO19
+  mosi_pin: GPIO23
+
+cc1101:
+  id: radio
+  cs_pin: GPIO5
+  frequency: 304.05MHz       # measured by sweep: remote sits ~303.96-304.16 MHz (FCC filing says 303.2)
+  modulation_type: ASK/OOK
+  output_power: 10
+  filter_bandwidth: 325kHz   # clean at 304 MHz; 812kHz also works
+
+remote_receiver:
+  pin: GPIO16                 # GDO2
+  # Skytech frame: 32 bits, ~1.47ms/bit, bit value = mark length
+  # (~950us mark = 1, ~480us mark = 0), ~3.5ms gap between repeated frames.
+  tolerance: 25%
+  filter: 200us               # real pulses are >= ~400us; drop glitches
+  idle: 2ms                   # longest in-frame space ~1ms, frame gap ~3.5ms
+  on_raw:
+    then:
+      - lambda: |-
+          id(rx_captures)++;
+          // Split the capture into runs of in-range pulses (250..1500us);
+          // any out-of-range mark/space (noise, frame gap) ends a run.
+          // A run of 32..34 marks is a frame; keep its LAST 32 bits, since
+          // stray in-range noise can prepend a bit or two.
+          static uint32_t last_code = 0, last_ms = 0, repeats = 0;
+          auto emit = [&](uint32_t code, int bits) {
+            uint32_t now = millis();
+            if (code == last_code && now - last_ms < 500) {
+              repeats++;
+              id(clean_frames)++;
+              if (repeats == 1 && (code >> 12) == (uint32_t) ${remote_id}) {
+                // Confirmed: our remote's ID, two identical frames in a row.
+                uint32_t cmd = code & 0xFFF;
+                bool flame = (cmd & 0x7) != 0;
+                bool manual = (cmd & 0x8) != 0;
+                bool ha_on = id(fireplace).state;
+                if (manual) {
+                  ESP_LOGI("sync", "remote button: %s (cmd %03X)", flame ? "ON" : "OFF", (unsigned) cmd);
+                  if (flame != ha_on) id(fireplace).publish_state(flame);   // adopt, no TX
+                } else if (flame != ha_on) {
+                  if (millis() - id(last_reassert_ms) > 10000) {
+                    ESP_LOGW("sync", "remote auto-send says %s but HA says %s -> re-sending HA state",
+                             flame ? "ON" : "OFF", ha_on ? "ON" : "OFF");
+                    id(last_reassert_ms) = millis();
+                    id(send_skytech).execute(ha_on ? 0x597 : 0x580);
+                  }
+                }
+              }
+            } else {
+              if (repeats) ESP_LOGI("skytech", "  (previous code x%u)", (unsigned) (repeats + 1));
+              repeats = 0;
+              char b[13];
+              for (int i = 0; i < 12; i++) b[i] = (code >> (11 - i)) & 1 ? '1' : '0';
+              b[12] = 0;
+              ESP_LOGI("skytech", "code=%08X  id=%05X  cmd=%03X  cmd_bits=%.4s %.4s %.4s%s",
+                       (unsigned) code, (unsigned) (code >> 12), (unsigned) (code & 0xFFF),
+                       b, b + 4, b + 8, bits != 32 ? "  (trimmed)" : "");
+              id(clean_frames)++;
+              char s[24];
+              snprintf(s, sizeof(s), "%08X", (unsigned) code);
+              id(last_code_sensor).publish_state(s);
+            }
+            last_code = code;
+            last_ms = now;
+          };
+          uint32_t code = 0;
+          int bits = 0, frames = 0;
+          auto flush = [&](int32_t why) {
+            if (bits >= 32 && bits <= 34) { emit(code, bits); frames++; }
+            else if (bits >= 8) ESP_LOGV("skytech", "run of %d bits (%08X) ended by %d us", bits, (unsigned) code, (int) why);
+            code = 0;
+            bits = 0;
+          };
+          for (auto d : x) {
+            int32_t a = d < 0 ? -d : d;
+            bool ok = a >= 250 && a <= 1500;
+            if (!ok) { flush(d); continue; }
+            if (d > 0) { code = (code << 1) | (d > 700 ? 1 : 0); bits++; }
+          }
+          flush(0);
+          if (frames == 0 && x.size() >= 16) {
+            ESP_LOGV("skytech", "capture of %u pulses, no clean frame", (unsigned) x.size());
+            // Dump raw timings (us, +mark/-space) for undecoded captures.
+            std::string out;
+            char t[10];
+            for (size_t i = 0; i < x.size(); i++) {
+              snprintf(t, sizeof(t), "%d ", (int) x[i]);
+              out += t;
+              if (out.size() > 180 || i + 1 == x.size()) {
+                ESP_LOGV("skytech", "  raw: %s", out.c_str());
+                out.clear();
+              }
+            }
+          }
+
+remote_transmitter:
+  pin: GPIO4                  # GDO0
+  carrier_duty_percent: 100%
+  non_blocking: false
+  on_transmit:
+    then:
+      - cc1101.begin_tx
+  on_complete:
+    then:
+      - cc1101.begin_rx
+
+globals:
+  - id: rx_captures
+    type: uint32_t
+    initial_value: '0'
+  - id: clean_frames
+    type: uint32_t
+    initial_value: '0'
+  - id: last_reassert_ms
+    type: uint32_t
+    initial_value: '0'
+
+# Diagnostics: radio activity heartbeat + keep the CC1101 in RX.
+interval:
+  # Receiver shuts the fireplace down after 60 min + 2 h without a signal,
+  # so re-send the current state every 30 min (no-beep codes, like the
+  # remote's own automatic sends).
+  - interval: 30min
+    then:
+      - lambda: |-
+          bool on = id(fireplace).state;
+          ESP_LOGI("keepalive", "re-sending state: %s", on ? "ON" : "OFF");
+          id(send_skytech).execute(on ? 0x597 : 0x580);
+  - interval: 60s
+    then:
+      - lambda: |-
+          ESP_LOGI("radio", "last 60s: %u captures, %u clean frames (freq %.0f kHz, bw %.0f kHz)",
+                   (unsigned) id(rx_captures), (unsigned) id(clean_frames),
+                   id(rx_freq_khz).state, id(rx_bw_khz).state);
+          id(rx_captures) = 0;
+          id(clean_frames) = 0;
+      - cc1101.begin_rx
+
+text_sensor:
+  - platform: template
+    id: last_code_sensor
+    name: "Last RF code"
+
+button:
+  - platform: restart
+    name: "Restart"
+
+# Tuning: change RX frequency / filter over HTTP without reflashing, e.g.
+#   curl -X POST 'http://<ip>/number/RX%20frequency%20kHz/set?value=303875'
+web_server:
+  port: 80
+  version: 3
+
+number:
+  - platform: template
+    id: rx_freq_khz
+    name: "RX frequency kHz"
+    min_value: 300000
+    max_value: 348000
+    step: 25
+    initial_value: 304050
+    optimistic: true
+    restore_value: false   # radio boots with cc1101: values; keep display in sync
+    mode: box
+    set_action:
+      - cc1101.set_idle
+      - cc1101.set_frequency: !lambda "return x * 1000.0f;"
+      - cc1101.begin_rx
+      - lambda: 'ESP_LOGI("radio", "RX frequency -> %.0f kHz", x);'
+  - platform: template
+    id: rx_bw_khz
+    name: "RX filter kHz"
+    min_value: 58
+    max_value: 812
+    step: 1
+    initial_value: 325
+    optimistic: true
+    restore_value: false   # radio boots with cc1101: values; keep display in sync
+    mode: box
+    set_action:
+      - cc1101.set_idle
+      - cc1101.set_filter_bandwidth: !lambda "return x * 1000.0f;"
+      - cc1101.begin_rx
+      - lambda: 'ESP_LOGI("radio", "RX filter -> %.0f kHz", x);'
+
+# --- Transmit ---------------------------------------------------------------
+# Skytech frame on air: each bit = low gap then high pulse (~1.46 ms total)
+#   1 = ~510 us gap + ~950 us pulse,  0 = ~990 us gap + ~480 us pulse
+# 32 bits = 20-bit remote ID + 12-bit command, MSB first; ~3.5 ms between
+# repeated frames. The real remote sends ~10 repeats per press.
+script:
+  - id: send_skytech
+    mode: queued
+    parameters:
+      cmd: int
+    then:
+      - lambda: 'ESP_LOGI("tx", "sending %05X%03X x10", (unsigned) ${remote_id}, (unsigned) (cmd & 0xFFF));'
+      - remote_transmitter.transmit_raw:
+          code: !lambda |-
+            const uint32_t code = ((uint32_t) ${remote_id} << 12) | ((uint32_t) cmd & 0xFFF);
+            std::vector<int32_t> v;
+            v.reserve(10 * 64);
+            for (int r = 0; r < 10; r++) {
+              for (int i = 31; i >= 0; i--) {
+                bool one = (code >> i) & 1;
+                if (i == 31) {
+                  if (r > 0) v.push_back(-3500);         // inter-frame gap
+                } else {
+                  v.push_back(one ? -510 : -990);       // gap before this bit's pulse
+                }
+                v.push_back(one ? 950 : 480);           // pulse
+              }
+            }
+            v.push_back(-3500);
+            return v;
+      - lambda: 'ESP_LOGI("tx", "done");'
+
+# Fireplace on/off. Fan follows flame: ON = flame+fan (59F), OFF = 588.
+# Both are "button press" codes, so the receiver beeps once.
+# After a reboot/power loss the switch starts OFF and sends OFF (safe default).
+switch:
+  - platform: template
+    id: fireplace
+    name: "Fireplace"
+    icon: mdi:fireplace
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - script.execute:
+          id: send_skytech
+          cmd: 0x59F
+    turn_off_action:
+      - script.execute:
+          id: send_skytech
+          cmd: 0x588
