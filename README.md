@@ -23,8 +23,11 @@ all of its factory safety logic; the ESP just looks like (a copy of) the remote.
 - [x] Remote sync: validated frames (ID `F7FF1` + 2 identical); remote button
       presses update HA; remote *auto* sends that disagree get overridden
 - [ ] HA thermostat (`generic_thermostat`, Zigbee sensor for now)
-- [ ] Local temp/humidity sensor — SHT41 ordered; wiring + config in "SHT41" section
-- [ ] Verify what the remote sends hourly while parked in Off
+- [ ] Intake-air temp/humidity sensor — SHT41 ordered; wiring + config in "SHT41" section
+- [ ] 3D-printed case — draft in `case/` (not yet rendered/printed)
+- [x] Remote parked in Off sends `580` (flame off, no-beep) **every 15 min**,
+      9 frames per burst (observed 08:19–11:04 on 2026-11-21). Not 60 min as the
+      manual implies. The sync logic treats it as "agrees with HA OFF"; nothing to do.
 
 ## Findings, 2026-11-20 session (supersedes older notes below)
 
@@ -82,16 +85,21 @@ dashboard websocket (`/ws`: `devices/logs`, `devices/update_config`,
    - `text_sensor` "Last RF code", radio tuning numbers, restart button
 2. **Thermostat:** [`homeassistant/fireplace_thermostat.yaml`](homeassistant/fireplace_thermostat.yaml)
    is a `generic_thermostat` package. Set `target_sensor` to a room temperature
-   sensor (any Zigbee sensor works, or the SHT41 once fitted), check the
+   sensor somewhere in the room (e.g. Zigbee). Not the SHT41: it lives in the
+   ESP32 case under the fireplace and reads intake air. Check the
    `heater` entity ID, and restart HA.
    - `min_cycle_duration: 5 min` protects the gas valve and ignition from rapid cycling.
    - `initial_hvac_mode: off` stops an HA restart from lighting the fireplace.
    - No `keep_alive`: that would make the receiver beep every few minutes; the
      ESP32 sends its own silent keep-alive every 30 min.
-3. **Leave the physical remote in Off (or ON) — never THERMO** while HA runs the
-   thermostat. In THERMO the remote sends its own on/off every 2 min; the
-   ESP32 overrides those, but the two would keep fighting. Pressing the
-   remote's Mode button still works and updates HA.
+3. **Take the batteries out of the physical remote** while HA runs the
+   fireplace. The remote re-sends its own state in every mode (`580` every
+   15 min in Off, on/off every 2 min in THERMO), and the receiver obeys it.
+   With HA ON and the remote parked in Off, the receiver would put the flame
+   out every 15 min until the ESP32 re-sent ON. Keep the remote (with
+   batteries stored next to it) as a backup; if you use it, the ESP32 adopts
+   its button presses. The receiver's slide switch ON position also works
+   without any radio at all.
 
 ## Using this with your own fireplace
 
@@ -110,7 +118,7 @@ dashboard websocket (`/ws`: `devices/logs`, `devices/update_config`,
   defaults to OFF on reboot. Don't leave the fireplace running unattended
   in ways you wouldn't with the original remote.
 
-## SHT41 temperature/humidity sensor (ordered, not yet installed)
+## SHT41 intake-air temperature/humidity sensor (ordered, not yet installed)
 
 ### Wiring (SHT41 breakout → ESP32-WROOM)
 
@@ -129,13 +137,16 @@ All on the same header side as the CC1101 signal pins except 3V3.
 - A cable of up to ~1–2 m between ESP32 and sensor is fine for I2C at the
   default speed. Twisted pair or a short ribbon helps.
 
-### Placement
+### Placement and purpose
 
-The thermostat reads the **room**, so the sensor must not see the fireplace:
-- Away from the fireplace's heat and the warm-air path, direct sun, and
-  outside walls.
-- A few cm or more from the ESP32 board (it warms slightly).
-- Roughly the height where people sit.
+The ESP32 lives in its case **under the fireplace, about 1 ft from the
+receiver**, and the SHT41 sits in a vented pocket of that case. So it measures
+**intake air under the fireplace**, not the room. That makes it a diagnostic
+(how warm the area around the receiver/valve gets, whether the fan is moving
+air), **not** a thermostat input. The HA thermostat uses a separate room sensor.
+
+The case keeps the SHT41 in its own walled-off pocket so the ESP32's own heat
+doesn't skew it.
 
 ### ESPHome config to add (to `fireplace-esp32.yaml`)
 
@@ -148,15 +159,12 @@ i2c:
 sensor:
   - platform: sht4x
     temperature:
-      name: "Room temperature"
-      id: room_temp
+      name: "Intake temperature"
+      id: intake_temp
     humidity:
-      name: "Room humidity"
+      name: "Intake humidity"
     update_interval: 30s
 ```
-
-Then switch the HA `generic_thermostat` `target_sensor` from the Zigbee
-sensor to `sensor.fireplace_esp32_room_temperature` (check the exact entity ID).
 
 Check after first boot: the log should show `Found i2c device at address 0x44`.
 If it doesn't, SDA/SCL are probably swapped.
@@ -167,7 +175,7 @@ If it doesn't, SDA/SCL are probably swapped.
 |---|---|
 | **ESP32-WROOM DevKit** (38-pin, USB-C, "FEIYANG") | Current board. RMT hardware captures pulses cleanly. Labels on the back use a `P` prefix (`P4` = GPIO4). |
 | CC1101 module, **433 MHz-labelled** | Chip covers 300–348 MHz; the 433 matching network costs range at 304 MHz. Fine with the ESP32 placed near the fireplace receiver. A 315 MHz board is the upgrade if range is ever a problem. |
-| Antenna | 9" whip on the SMA (ideal ¼ wave at 304 MHz is 24.7 cm / 9.7"). Keep it **upright and away from the USB cable**. |
+| Antenna | 10 cm SMA antenna tuned for 315 MHz (ordered; tested so far with a 2" stub and a 9" whip, both similar). 315 is close enough to 304. Keep it **upright and away from the USB cable**. |
 | ~~Lolin NodeMCU v3 (ESP8266)~~ | Retired: missed edges under Wi-Fi load. Config kept as `fireplace.yaml`. |
 
 ### Wiring (CC1101 → ESP32-WROOM)
@@ -286,6 +294,7 @@ Manual: <https://fccid.io/K9L3301TX/User-Manual/Updated-user-manual-327753>
   modes. If the receiver hears nothing for 60 min it starts a **2-hour
   countdown**, then shuts the appliance off and beeps every 4 s until MODE
   (→ ON) is pressed. **The ESP must transmit at least hourly.**
+  (Observed: in Off this remote actually sends `580` every 15 min.)
 - **Thermo safety:** receiver shuts down if its case reaches 130 °F.
 - Receiver **beeps once** on a manual ON/OFF command (no beep for THERMO
   cycling) — handy confirmation that transmissions are accepted.
@@ -303,8 +312,9 @@ Manual: <https://fccid.io/K9L3301TX/User-Manual/Updated-user-manual-327753>
   physical remote).
 - **Remote conflict:** the physical remote re-sends its own state hourly (and
   every 2 min in THERMO), which will override the ESP. Options: ESP listens and
-  syncs to remote presses; leave remote in OFF (verify whether OFF still
-  beacons); or pull the remote's batteries and let HA be the sole controller.
+  syncs to remote presses; or pull the remote's batteries and let HA be the
+  sole controller. Resolved: OFF does beacon (`580` every 15 min), so pull
+  the batteries.
 - Is the polarity (long = 1) right, and is there a checksum in the 12 bits?
 
 ## Next captures

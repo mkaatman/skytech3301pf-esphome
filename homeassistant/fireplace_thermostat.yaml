@@ -11,14 +11,15 @@
 #
 # Entity IDs to check (Settings -> Devices & services -> ESPHome -> fireplace-esp32):
 #   heater:        the ESPHome "Fireplace" switch
-#   target_sensor: any room temperature sensor (Zigbee, the SHT41 on the ESP32, ...)
+#   target_sensor: a room temperature sensor in the living space (e.g. Zigbee).
+#                  Not the ESP32's SHT41: it sits under the fireplace (intake air).
 
 climate:
   - platform: generic_thermostat
     unique_id: fireplace_thermostat
     name: Fireplace
     heater: switch.fireplace_esp32_fireplace
-    target_sensor: sensor.REPLACE_WITH_ROOM_TEMPERATURE   # e.g. sensor.fireplace_esp32_room_temperature
+    target_sensor: sensor.REPLACE_WITH_ROOM_TEMPERATURE
     min_temp: 60
     max_temp: 80
     target_temp: 70
