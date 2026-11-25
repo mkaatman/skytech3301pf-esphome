@@ -181,6 +181,22 @@ interval:
           id(clean_frames) = 0;
       - cc1101.begin_rx
 
+# SHT41 in the case's vented pocket: intake air under the fireplace
+# (diagnostic only; the HA thermostat uses a room sensor).
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true                  # SHT41 should show up at 0x44
+
+sensor:
+  - platform: sht4x
+    temperature:
+      name: "Intake temperature"
+      id: intake_temp
+    humidity:
+      name: "Intake humidity"
+    update_interval: 30s
+
 text_sensor:
   - platform: template
     id: last_code_sensor

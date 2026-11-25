@@ -23,7 +23,7 @@ all of its factory safety logic; the ESP just looks like (a copy of) the remote.
 - [x] Remote sync: validated frames (ID `F7FF1` + 2 identical); remote button
       presses update HA; remote *auto* sends that disagree get overridden
 - [ ] HA thermostat (`generic_thermostat`, Zigbee sensor for now)
-- [ ] Intake-air temp/humidity sensor — SHT41 ordered; wiring + config in "SHT41" section
+- [x] Intake-air temp/humidity sensor: SHT41 installed 2026-11-25, reads ~23 °C / 35 %RH; see "SHT41" section
 - [ ] 3D-printed case — draft in `case/` (not yet rendered/printed)
 - [x] Remote parked in Off sends `580` (flame off, no-beep) **every 15 min**,
       9 frames per burst (observed 08:19–11:04 on 2026-11-21). Not 60 min as the
@@ -118,7 +118,7 @@ dashboard websocket (`/ws`: `devices/logs`, `devices/update_config`,
   defaults to OFF on reboot. Don't leave the fireplace running unattended
   in ways you wouldn't with the original remote.
 
-## SHT41 intake-air temperature/humidity sensor (ordered, not yet installed)
+## SHT41 intake-air temperature/humidity sensor
 
 ### Wiring (SHT41 breakout → ESP32-WROOM)
 
@@ -148,7 +148,7 @@ air), **not** a thermostat input. The HA thermostat uses a separate room sensor.
 The case keeps the SHT41 in its own walled-off pocket so the ESP32's own heat
 doesn't skew it.
 
-### ESPHome config to add (to `fireplace-esp32.yaml`)
+### ESPHome config (included in `fireplace-esp32.yaml`)
 
 ```yaml
 i2c:
@@ -194,7 +194,7 @@ Count pins from the **USB-C end**. All signal pins are on the side labelled
 | MOSI | **P23** | 23 | CLK side, 18th from USB |
 | VCC | **3V3** | — | other side, last pin at the antenna end (**not** 5V) |
 
-The SHT41 (when installed) adds SDA → P21 and SCL → P22; see the SHT41 section.
+The SHT41 adds SDA → P21 and SCL → P22; see the SHT41 section.
 
 ## Firmware
 
