@@ -205,6 +205,36 @@ text_sensor:
 button:
   - platform: restart
     name: "Restart"
+#   # Same as the physical button's "on" press, from HA.
+#   - platform: template
+#     name: "Fireplace timed run"
+#     icon: mdi:fireplace
+#     on_press:
+#       - script.execute: timed_run
+
+## Physical pushbutton: GPIO32 -> button -> GND (internal pull-up).
+## Press while off: fireplace ON for "Button run time" minutes, then OFF.
+## Press while on: OFF (whoever turned it on).
+# binary_sensor:
+#   - platform: gpio
+#     name: "Fireplace button"
+#     pin:
+#       number: GPIO32
+#       mode:
+#         input: true
+#         pullup: true
+#       inverted: true
+#     filters:
+#       - delayed_on: 30ms        # debounce / ignore noise on a long wire
+#       - delayed_off: 30ms
+#     on_press:
+#       - if:
+#           condition:
+#             switch.is_on: fireplace
+#           then:
+#             - switch.turn_off: fireplace
+#           else:
+#             - script.execute: timed_run
 
 # Tuning: change RX frequency / filter over HTTP without reflashing, e.g.
 #   curl -X POST 'http://<ip>/number/RX%20frequency%20kHz/set?value=303875'
@@ -213,6 +243,18 @@ web_server:
   version: 3
 
 number:
+#   - platform: template
+#     id: run_minutes
+#     name: "Button run time"
+#     icon: mdi:timer-outline
+#     unit_of_measurement: min
+#     min_value: 5
+#     max_value: 120
+#     step: 5
+#     initial_value: 15
+#     optimistic: true
+#     restore_value: true
+#     mode: box
   - platform: template
     id: rx_freq_khz
     name: "RX frequency kHz"
@@ -276,6 +318,21 @@ script:
             return v;
       - lambda: 'ESP_LOGI("tx", "done");'
 
+#   # Timed run: ON now, OFF after "Button run time". Pressing again while it
+#   # runs turns it off; turning off any other way cancels the timer.
+#   - id: timed_run
+#     mode: restart
+#     then:
+#       - lambda: 'ESP_LOGI("button", "timed run: ON for %.0f min", id(run_minutes).state);'
+#       - switch.turn_on: fireplace
+#       - delay: !lambda "return (uint32_t) (id(run_minutes).state * 60000.0f);"
+#       - if:
+#           condition:
+#             switch.is_on: fireplace
+#           then:
+#             - lambda: 'ESP_LOGI("button", "timed run finished: OFF");'
+#             - switch.turn_off: fireplace
+
 # Fireplace on/off. Fan follows flame: ON = flame+fan (59F), OFF = 588.
 # Both are "button press" codes, so the receiver beeps once.
 # After a reboot/power loss the switch starts OFF and sends OFF (safe default).
@@ -294,3 +351,5 @@ switch:
       - script.execute:
           id: send_skytech
           cmd: 0x588
+#     on_turn_off:                # also fires when the remote turns it off
+#       - script.stop: timed_run
